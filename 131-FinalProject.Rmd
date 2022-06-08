@@ -1,0 +1,606 @@
+---
+title: "Should I Drink this Water?"
+author: "Eric Wang"
+date: "PSTAT 131 Final Project"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+<style type="text/css">
+  body{
+  font-size: 10pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The main goal of this project is to be able to predict the potability, or drinkability, of water based on several attributes. As an aside, I want to analyze the significance of each predictor and how their values affect the chances of the water sample being drinkable. To achieve these objectives, I will be cleaning the data, conducting exploratory data analysis, and fitting & tuning models.
+
+
+
+## Significance of the Project
+
+![](https://cdn.discordapp.com/attachments/814416594406735884/977435689891270666/unknown.png){height=200px width=400px}
+
+Access to drinkable water is (or should be!) a basic human right. It is essential to one's health and an integral part of effective policy for healthcare protection. This makes sense; the average person drinks about 8 cups of water per day-- a non-trivial portion of their diet-- and if even one of those 8 cups are filled with chemicals or inedible substance, their health will undoubtedly be at risk. In some regions around the world, it may be worthwhile for the government at a lucrative level to invest in water supply sanitation since the reduction in health care costs can greatly outweigh the cost of sanitation. If we are able to accurately predict the potability of a given water sample based on a set of attributes, then our model could be used by governments to figure out which water attributes they should focus on. Additionally, our model may be able to help determine which water sources are in need of government intervention. For example, if a region tends to have higher sulfate levels (for the sake of illustration) and our project indicates that higher sulfate levels tend to have less potability, then the government in that region should be mindful of this phenomenon and investigate-- even if they **think** their water is perfectly safe for human consumption. 
+
+
+## The Data
+
+Our data come from Kaggle, a platform that provides thousands of datasets through the generosity of other users. The dataset comes with 10 variables-- 9 predictors and 1 outcome variable. It is unknown how the water is sampled and where the population of water samples comes from, but we will assume that they are randomly sampled and come from different areas of the world. 
+
+The outcome variable will be binary, potable (1) or not potable (0). Although a codebook is provided along with this report, a brief summary for a handful of variables will be included for sake of convenience. 
+
+`pH value`: PH is an important parameter in evaluating the acid–base balance of water. It is also the indicator of acidic or alkaline condition of water status. WHO has recommended maximum permissible limit of pH from 6.5 to 8.5.  
+
+`chloramines`: Chlorine and chloramine are the major disinfectants used in public water systems. Chloramines are most commonly formed when ammonia is added to chlorine to treat drinking water.
+
+`sulfate`: Sulfates are naturally occurring substances that are found in minerals, soil, and rocks. They are present in ambient air, groundwater, plants, and food.   
+
+`conductivity`: Pure water is not a good conductor of electric current rather’s a good insulator. Increase in ions concentration enhances the electrical conductivity of water. 
+
+`organic_carbon`: Total Organic Carbon (TOC) in source waters comes from decaying natural organic matter (NOM) as well as synthetic sources. TOC is a measure of the total amount of carbon in organic compounds in pure water.  
+
+`trihalomethanes`: THMs are chemicals which may be found in water treated with chlorine. The concentration of THMs in drinking water varies according to the level of organic material in the water, the amount of chlorine required to treat the water, and the temperature of the water that is being treated.
+
+
+
+# Data Cleaning
+
+![](https://cdn.discordapp.com/attachments/814416594406735884/977435278115471470/unknown.png){height=200px width=400px}
+
+Here, I'll briefly read in the dataset and call the necessary packages.
+```{r, hide = TRUE, message= FALSE, warning = FALSE}
+water <- read.csv("C:/Users/rocke/Downloads/water_potability.csv")
+
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(corrplot)
+library(gridExtra)
+library(psych)
+library(ISLR)
+library(ISLR2)
+library(glmnet)
+library(yaml)
+library(randomForest)
+library(xgboost)
+library(rpart.plot)
+library(vip)
+library(ranger)
+library(kknn)
+library(vip)
+tidymodels_prefer()
+
+set.seed(1234)
+```
+
+Thus far, I have no belief that any of these predictors will be unnecessary, so I will not be filtering any of them out.
+
+Fortunately, each predictor in the dataset is numerical, meaning that no factor or dummy coding will be required-- except for the outcome (which is binary). In usual cases, binary variables do not need to be factor encoded if they are numerical, but the 0's and 1's in the dataset are encoded as strings.
+
+```{r, class.source = "fold-show"}
+water$Potability <- factor(water$Potability)  # factor encoding the outcome
+```
+
+However, we have to deal with the problem of missing values. Some observations do not have values for one or more columns, which makes the data incompatible with machine learning models. Let's take a look at what variables have missing values.
+
+```{r, class.source = "fold-show"}
+summary(water)  # used to look for na values. they will have their own row if any
+```
+
+Only the variables ph, Sulfate, and Trihalomethanes have missing values. 
+Now, we must ask the question: "Does it make sense to impute values for the necessary predictors?" In my opinion, it does not. Water potability is a highly sensitive prediction to make, and even if it wasn't, water samples in general *can* vary significantly in each of their attributes. I will be making the assumption that the missing values are missing at random because that makes intuitive sense-- hard to think of a reason why more or less potable water leads to missing data. Thus, I will be dropping any observation containing a missing value. 
+
+```{r}
+water <- na.omit(water)  # just removing all na's from the data
+```
+
+Now, we will move on to splitting the data.
+
+
+# The Initial Split
+
+I think a fair split would be 80% training data and 20% testing data. We only have 2011 observations in our dataset after dropping the na's, so this split will give ample training data and a good sized testing set to evaluate on. I will be stratifying on the outcome variable, Potability, as this would give us a balanced distribution of outcomes in the training and testing data.
+
+```{r, class.source = "fold-show"}
+water_split <- water %>%
+  initial_split(prop = 0.8, strata = "Potability")  # 80/20 train/test split
+
+water_train <- training(water_split)
+water_test <- testing(water_split)
+```
+
+Now that the data has been prepared, we will take a look at the data more closely.
+
+# Exploratory Data Analysis (EDA)
+
+Exploratory data analysis is an essential part of model building. This is where I will determine if any variables need to be dropped, or if I need want to add interaction terms. Additionally, it gives me a better intuition of what my data looks like and how each predictor affects the model results. 
+
+***
+
+First, I want to explore how each predictor is related. If any two are highly correlated, I may opt to drop them out from my model because they would only be providing redundant information. Or, I could add interaction terms between them.
+
+```{r}
+corr_water <- cor(water[,-10])  # dropping the outcome
+corrplot(corr_water, method = "square", order = "alphabet", type = "lower")  # creating a correlation plot
+
+```
+
+It seems that none of these predictors are too strongly correlated. I don't think I'll be adding any interaction terms or dropping variables from my data. Additionally, the literature I have read does not provide strong enough evidence for interactions to be added.
+
+***
+
+The next important part is to determine what the distribution of my outcome looks like. Although I have already stratified my data by the outcome, it is important to check if there is an imbalance. Sometimes a large imbalance of data could lead to the model over-predicting one class (stratifying won't fix this).
+
+```{r, warning = FALSE}
+ggplot(water, aes(x = Potability)) +
+  geom_histogram(color = "darkblue", fill = "lightblue", bins = 3, stat = "count") +
+  theme_classic()  # looking at the distribution of the outcome. making sure it isn't too imbalanced
+```
+
+It seems to me that there isn't too much of an imbalance-- at least not enough to affect model predictions. On to the next visualization!
+
+***
+
+I want to see how each of the predictors is associated with the outcome variable. To do so, I will construct multiple boxplots that show how each predictor value varies within the outcome variable. 
+
+```{r, fig.width = 10, fig.height = 10}
+par(mfrow = c(3,3))
+# creating boxplots for each predictor, categorized by the outcome
+boxplot(ph ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Hardness ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Solids ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Chloramines ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Sulfate ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Conductivity ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Organic_carbon ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Trihalomethanes ~ Potability, water, notch = TRUE, col = "turquoise")
+boxplot(Turbidity ~ Potability, water, notch = TRUE, col = "turquoise")
+```
+
+Wow! It doesn't seem like the values of the predictors change much while the water is drinkable or undrinkable. This is an interesting find, as I would have inferred that for at least some of the predictors, their values between potable and non-potable would vary by a decent amount (especially for pH).  
+However, I do notice that there are some small and large outliers on the boxplots, and many of them tend to be on the non-potable side. Maybe this means undrinkable water tends to have more extreme values? 
+
+***
+
+Finally, to get a better feel of the data, I will be looking at the distribution of each predictor, as well as each pairwise scatterplot (this scatterplot part is a bit redundant as I have already looked at the correlation heat map, but the more visualizations the better!). Note that for each pairwise scatterplot that contains Potability, it will like a boxplot. 
+```{r}
+pairs.panels(water, density = FALSE, cor = FALSE, lm = FALSE)  # creating a pair panel plot for all variables in the model
+```
+
+Interesting, each predictor is normally distributed (as one could expect for real world data... sometimes). The scatterplots also do a good job at displaying how uncorrelated the predictors are with another (great for logistic regression! no multicollinearity). 
+
+
+
+
+# Models
+
+![](https://cdn.discordapp.com/attachments/814416594406735884/977434291405459456/unknown.png){height=200px width=400px}
+
+## Model Preparation
+
+Everything we have done so far has led to the beginning of the model building process. Due to the nature of our data, this section will be relatively quick!
+
+To begin, I will prepare my recipe.
+
+```{r}
+water_recipe <- recipe(Potability ~ ., data = water) %>%  # the . selects all the predictors
+  step_normalize(all_predictors())  # centers and scales all predictors
+
+# no categorical variables --> no need to dummy code
+```
+
+  Next, we will use k-fold cross validation in order to tune the models. This is the process of splitting the data into k folds, fitting the model to the k-1 folds, and using the left out fold as the testing set. The process is repeated k times.  
+Here, I will be folding my data into 10 folds with 3 repeats in order to increase the robustness of estimates for each hypertuned model. 
+
+```{r}
+water_folds <- vfold_cv(water_train, v = 10, repeats = 3)  # 10 folds, 3 repeats
+```
+
+## Model Building
+
+
+Next, we will move on to setting up workflows and tuning grids for the models.  
+
+Because we are working with a classification problem, we will be fitting and tuning these models:  
+-**Random Forest**  
+-**Boosted Tree**  
+-**Logistic Regression**  
+-**K-Nearest Neighbors (KNN)**
+
+### Random Forest
+
+Here, I specify a random forest tree for classification. Mtry, trees, and min_n will be tuned. `Mtry` is the number of features considered at each point, which will reduce bias from decision trees' greedy approach. `Trees` is the number of trees for the ensemble. `Min_n` is the minimum number of datapoints required for a node to be split further.
+
+```{r, class.source = "fold-show"}
+# specifying random forest with a ranger engine focused on impurity for classification
+# mtry, trees, and min_n will be tuned
+rf_spec <- rand_forest(mtry = tune(), trees = tune(), min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")  # specifying ranger engine focused on impurity for classification
+```
+
+Next, I set up the workflow. 
+
+```{r, class.source = "fold-show"}
+# creating a workflow for random forest with the model and our recipe
+rf_wf <- workflow() %>% 
+  add_model(rf_spec) %>%
+  add_recipe(water_recipe)
+```
+
+This is the tuning grid for each hyperparameter. Random forests generally take a while to fit, so I will keep each level relatively low. Note that 3 * 3 * 3 * 10 * 3 = 810 random forests will be fit.
+
+```{r, class.source = "fold-show"}
+# creating a grid of hyperparameter ranges
+rf_grid <- grid_regular(mtry(range = c(2, 9)), 
+                        trees(range = c(100, 500)), 
+                        min_n(range = c(10, 100)), 
+                        levels = c(3, 2, 2))
+```
+
+Finally, I will tune the model. This process took quite a long time-- about 5 hours. This was expected as random forests tend to take a long time to fit, and if the data were larger or more hyperparameters were tuned, this process could take much longer.
+
+```{r, class.source = "fold-show", eval = F}
+# tuning the model with the grid
+rf_tune_result <- tune_grid(
+  rf_wf, 
+  resamples = water_folds, 
+  grid = rf_grid
+)
+```
+
+```{r, include = FALSE}
+load(file = "rf_tune_result2.Rdata")
+```
+
+### Boosted Trees
+
+Here, I specify a boosted tree model for classification. Trees, learn_rate, min_n, and mtry will be tuned. `Learn_rate` is the learning rate for the boosted tree from iteration to iteration. 
+
+```{r, class.source = "fold-show"}
+# specifying a boosted tree model with xgboost engine for classification
+# trees, learn_rate, min_n, and mtry will be tuned
+boost_spec <- boost_tree(trees = tune(), learn_rate = tune(), min_n = tune(), mtry = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+```
+
+Next is the workflow.
+
+```{r, class.source = "fold-show"}
+# setting up the workflow with the model and our recipe
+boost_wf <- workflow() %>%
+  add_model(boost_spec) %>%
+  add_recipe(water_recipe)
+```
+
+Now the tuning grid. Note that 3 * 3 * 3 * 3 * 10 * 3 = 2,430 boosted trees will be fit. 3 levels each were chosen due to the amount of hyperparameters chosen for tuning.  
+
+```{r, class.source = "fold-show"}
+# creating grid of hyperparameter ranges
+boost_grid <- grid_regular(trees(range = c(100, 2000)), 
+                        learn_rate(range = c(-5, 0.2)), 
+                        min_n(range = c(10, 100)), 
+                        mtry(range = c(2, 9)),
+                        levels = c(3, 3, 3, 3))
+```
+
+Finally, the model tuning. The process took quite a while-- almost 3 hours. This makes sense since so many boosted trees were fit.
+
+```{r, class.source = "fold-show", eval = F}
+# tuning the model with the grid
+boost_tune_res <- tune_grid(
+  boost_wf, 
+  resamples = water_folds, 
+  grid = boost_grid
+)
+```
+
+```{r, include = FALSE}
+load(file = "boost_tune_res.Rdata")
+```
+
+### Logistic Regression
+
+Here, I specify a logistic regression for classification. Penalty and mixture will be tuned. `Penalty` is the amount of regularization on the coefficients. `Mixture` is the proportion of L1 regularization in the model.
+
+```{r, class.source = "fold-show"}
+# specifying a logistic regression model with glmnet for classification
+# will be tuning penalty and mixture
+log_reg <- logistic_reg(penalty = tune(), mixture = tune()) %>% 
+  set_engine("glmnet") %>% 
+  set_mode("classification")
+```
+
+Then, the workflow.
+
+```{r, class.source = "fold-show"}
+# setting up the workflow with the model and our recipe
+log_workflow <- workflow() %>% 
+  add_model(log_reg) %>%
+  add_recipe(water_recipe)
+```
+
+This is the tuning grid. Note that 10 * 10 * 10 * 3 = 3000 logistic regression models will be fit.
+
+```{r, class.source = "fold-show"}
+# creating a grid of hyperparameter ranges
+params <- parameters(penalty(range = c(-10, 10)), mixture(range = c(0, 1)))
+penalty_mixture <- grid_regular(params, levels = c(10, 10))
+```
+
+Finally, the model tuning. The process did not take too long since logistic regression models are fit quite quickly.
+
+```{r, class.source = "fold-show", eval = F}
+# tuning the model with the grid
+logistic_tune_res <- tune_grid(
+  object = log_workflow,
+  resamples = water_folds,
+  grid = penalty_mixture
+)
+```
+
+```{r, include = FALSE}
+load(file = "logistic_tune_res.Rdata")
+```
+
+### K-Nearest Neightbors (KNN)
+
+Here, I specify a K-nearest neighbors model for classification. Only the amount of neighbors, `neighbors`, will be tuned. 
+
+```{r, class.source = "fold-show"}
+# specifying a knn model with the kknn model for classification
+# the number of neighbors will be tuned
+knn_model <- nearest_neighbor(neighbors = tune()) %>% 
+  set_mode("classification") %>%
+  set_engine("kknn")
+```
+
+Next is the workflow.
+
+```{r, class.source = "fold-show"}
+# setting up a workflow for knn with the knn model and our recipe
+knn_workflow <- workflow() %>% 
+  add_model(knn_model) %>% 
+  add_recipe(water_recipe)
+```
+
+Then, the parameter grid. Note that 10 * 10 * 3 = 300 KNN models will be fit. Usually, the optimal choice for k lies near the square root of the number of samples, which is around 40 in our case. However, it is important to still tune the value.
+
+```{r, class.source = "fold-show"}
+# creating a grid for the hyperparameter ranges
+knn_grid <- grid_regular(neighbors(range = c(5,100)), levels = 10)
+```
+
+Lastly, the tuning. The process took a relatively short amount of time-- a couple of minutes. This is to be expected since our training data has around 1600 observations and are working with KNN.
+
+```{r, class.source = "fold-show", eval = F}
+# tuning the grid
+knn_tune_result <- tune_grid(
+  object = knn_workflow,
+  resamples = water_folds,
+  grid = knn_grid
+)
+```
+
+```{r, include = FALSE}
+load(file = "knn_tune_result.Rdata")
+```
+
+## Model Analysis
+
+In this section, I will be looking at how the hyperparameters affect each model. Then, their accuracy will be estimated using the training data. The best performing model of the 4 will be chosen as the final model.
+
+### Random Forest
+
+```{r, class.source = "fold-show"}
+# a plot of the tune results for the random forest model
+autoplot(rf_tune_result)
+```
+
+It seems that more trees, a higher mtry value, and lower min_n values give our model better accuracy and roc_auc scores. Intuitively, the tree and mtry relationships make sense. Min_n values really depend on the dataset one is working with.
+
+***
+
+Now, I will look at the model with the best accuracy on the training data.
+
+```{r, class.source = "fold-show"}
+# shows the top 5 models based on accuracy
+show_best(rf_tune_result, metric = "accuracy") %>%
+  select(-.estimator, -.config)
+```
+
+After hypertuning random forest with 10-fold cross validation and 3 repeats, the best hyperparameters are mtry = 9, trees = 300, and min_n = 10. The best model has an accuracy of ~0.69. 
+
+
+### Boosted Trees
+
+```{r, class.source = "fold-show", fig.width = 15}
+# a plot of the tune results for the boosted tree model
+autoplot(boost_tune_res)
+```
+
+The relationships for each parameter here are a bit more ambiguous. It seems that the combination of hyperparameter values make a large difference in the performance of each model.
+
+***
+
+Similar to the previous section, we will look at the model with the best accuracy. 
+
+```{r, class.source = "fold-show"}
+# showing the top 5 models based on accuracy
+show_best(boost_tune_res, metric = "accuracy") %>%
+  select(-.estimator, -.config)
+```
+
+The best performing boosted tree has an accuracy of ~0.67. The hyperparameters for the best boosted tree are mtry = 5, trees = 1050, min_n = 10, and learn_rate = 0.00398. It is interesting that the boosted trees almost performs as well as the random forest one. I think this could be due to the fact that random forest utilized less trees and has one less tuned hyperparameter.
+
+### Logistic Regression
+
+```{r, class.source = "fold-show"}
+# a plot of the tune results for the logistic regression model
+autoplot(logistic_tune_res)
+```
+
+In terms of roc_auc, all the models improve at the same regularization value and plateau after a bit more regularization is added. Additionally, all of the models have the same roc_auc score at varying regularization value. What could be the cause of this? Well, I hypothesize that the model is only guessing one class wherever the roc_auc score is 0.5. Maybe the model could not pick up on distinctions within and between predictors. 
+
+***
+
+Now looking at the models with the best accuracies.
+
+```{r, class.source = "fold-show"}
+# showing the top 5 models based on accuracy
+show_best(logistic_tune_res, metric = "accuracy") %>%
+  select(-.estimator, -.config)
+```
+
+The model with the best accuracy (=0.5972) has a penalty of 0.077426 and a mixture of 0 (pure lasso model). The accuracies here are very, very similar, which strengthens the believe in my hypothesis that the model is predicting only one class. The best performing model probably predicted all observations as one class, except for one observation.
+
+### K-Nearest Neighbors
+
+```{r, class.source = "fold-show"}
+# a plot of the tune results for the k-nearest neighbors model
+autoplot(knn_tune_result)
+```
+
+The amount of neighbors improves the performance of the model until the high 40s, then gradually worsens. However, the roc_auc is improving with more neighbors. 
+
+***
+
+Let's take a look at the best performing model with respect to accuracy.
+
+```{r, class.source = "fold-show"}
+# showing the top 5 models based on accuracy
+show_best(knn_tune_result, metric = "accuracy") %>%
+  select(-.estimator, -.config)
+```
+
+The model with the best accuracy, ~0.662, has neighbors = 47. This comes close to the square root number of samples approximation for the number of neighbors. 
+
+## Final Model Assessment
+
+Now, we will choose the model with the best accuracy. It is evident that our random forest model performed the best, with an accuracy of ~0.69. Thus, I will be using that as the final model. Additionally, I will be evaluating the random forest model on the testing data. 
+
+***
+
+Below, I extract the best hyperparameters from the tuning grid, finalize the workflow with the new parameters, and re-fit the model on training data.
+
+```{r, class.source = "fold-show", eval = FALSE}
+rf_best_param <- select_best(rf_tune_result, metric = "accuracy")  # selects the best hyperparameters based on accuracy
+rf_final <- finalize_workflow(rf_wf, rf_best_param)  # finalize workflow with new hyperparameters
+rf_final_fit <- fit(rf_final, data = water_train)  # fits the new model on training data
+```
+
+```{r, include = FALSE}
+load(file = "rf_final_fit.Rdata")
+```
+
+Then, I print out the accuracy of the model.
+
+```{r, class.source = "fold-show"}
+# printing out the accuracy evaluated on testing data
+augment(rf_final_fit, new_data = water_test) %>%
+  accuracy(truth = Potability, estimate = .pred_class)
+```
+
+Wow! The accuracy on the testing data is better than on the training data. This is a rare and surprising case, but a welcome one. An accuracy of 0.7171 is decent (a lot better than the baseline of 0.5, which is randomly guessing).
+
+I will print out a confusion matrix to visualize the predictions vs. actual values.
+
+```{r, class.source = "fold-show"}
+augment(rf_final_fit, new_data = water_test) %>%
+  conf_mat(truth = Potability, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+Overall, this tells me that the quality of predictions generated by the random forest model is quite good. For each class, the model correctly predicts the class a lot more than it gets it wrong. 
+
+## Variable Assessment
+
+I will now be evaluating which variables are significant for predicting water potability. Most machine learning models, are more of a black box method and not interpretable at all. However, logistic regression and random forests provide a framework that allow one to analyze variable "importance". 
+
+***
+
+### Logistic Regression
+
+First, I need to select the best performing logistic regression model.
+
+```{r, class.source = "fold-show"}
+log_best_param <- select_best(logistic_tune_res, metric = "accuracy")  # selecting the best hyperparameters based on accuracy
+log_final <- finalize_workflow(log_workflow, log_best_param)  # finalizes the workflow with updated hyperparameters
+log_final_fit <- fit(log_final, data = water_train) %>% extract_fit_engine()  # fits the new model on training data and then extract the engine object for p-value analysis
+```
+
+Now, I am going to print out the coefficient estimates and p-values.
+
+```{r, class.source = "fold-show"}
+options(scipen = 999)  # turns off scientific notation
+tidy(log_final_fit)  # tidying the fitted object, makes the table neat
+```
+
+Unfortunately, none of the predictors are significant at an alpha level of 0.05. The p-values are rather large, except for the intercept. A low intercept p-value generally means that the predictors are not enough to explain the model fully. In our case the intercept p-value is extremely low, so the predictors are not doing a great job here (at least within the context of logistic regression). 
+
+The coefficients are extremely small. They barely change the log odds probability of the water being drinkable or not compared to the intercept. The large negative coefficient with miniscule predictor coefficients leads me to believe that the model is only predicting the 0, or not potable, class. 
+
+Just a small sanity check for my hypothesis:
+
+```{r, class.source = "fold-show"}
+log_final_fit <- fit(log_final, data = water_train)
+augment(log_final_fit, new_data = water_test) %>%
+  conf_mat(truth = Potability, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+As expected, the tuned logistic regression model predicts only the 0 class.
+
+It is important to note that the null hypothesis for each predictor is that said predictor has no significant relationship with the outcome variable. That is, it doesn't take into account how the predictors collectively can predict. This may be why random forests and other machine learning models tend to work better for predictors that seemingly have no patterns with the outcome.
+
+In summary, in the context of logistic regression, each predictor **on their own** is most likely not significant for predicting water potability.
+
+***
+
+### Random Forest
+
+However, in the context of random forests, the usefulness of each predictor may change. In this section, I will show what is called a variable importance plot. This plot details how important each variable was in terms of how many times said variable was split on to make accurate predictions.
+
+Here, I will extract the fit from the hypertuned workflow.
+
+```{r, class.source = "fold-show"}
+rf_extract <- rf_final_fit %>% extract_fit_parsnip()
+```
+
+Now the variable importance plot.
+
+```{r, class.source = "fold-show"}
+vip(rf_extract)
+```
+
+In this context, each variable seems to be relatively important for the model-- with sulfate and ph being the most useful by a decent margin.
+
+What could this mean? What is the distinction here between logistic regression and random forests?
+
+Well, it is important to note that logistic regression lies on the assumption of linearity, while random forests don't. There may be a very intricate pattern with the variables that is unable to be captured by logistic regression. However, recall that random forests are more of a black-boxy method, so take these results with a grain of salt. The predictors are all *useful* for the random forest, but does that directly mean they are useful in practice? Additionally, there is no information on the relationship between the predictors and outcome using the random forest method.
+
+The important takeaway is that each predictor is useful (to some degree) in the context of random forests. Here, the relationship between each predictor and outcome is uncertain, but the usefulness of the predictors for making accurate predictions is not something to be ignored. 
+
+# Conclusion
+
+The analysis performed above has provided a good deal of meaningful information and insight on the potability of water. However, it is important to note that I assumed that these water samples were randomly and independently sampled from across the world. If not the case in reality, then our conclusions may be erroneous. Moving on...
+
+It was found that it is possible to predict the potability of water quite accurately using a random forest model. Its accuracy of 0.7171 tells us that the predictions are moderately better than a random guess. Additionally, the confusion matrix printed gave us some intuition on the quality of the model's predictions, which was overall great. But does this mean that it is a reliable model to be used by others to assess potability of bodies of water? Well, I think it can be used as a second opinion or as a way to flag potentially undrinkable water, but never as a firm prediction. This is due to the sensitivity of our outcome-- if the model flagged a harmful water as drinkable, that could lead to dire consequences. 
+
+Unfortunately, it was not possible to reach our goal of retrieving significant variables for the prediction of water potability. As shown previously, the lack of predictability for each variable in our best performing logistic regression model led to the model predicting only one class. And although it was shown that there are two predictors that were especially useful for splits in the random forest model, it is hard to say what that means in a practical sense. Remember, random forests are quite high on the un-interpretable scale. 
+
+To improve model accuracy and have more significant results, I think it would be worthwhile to collect a larger subset of variables, ensure that the water samples come from a larger area (whole country, state, etc), and verify that the water samples are randomly and independently sampled. It may be the case that our data was not high quality and, thus, led to insignificant predictors and/or model accuracy that is lower than it should be. (But that is just an assumption due to the lack of information provided by the sampler).
+
+To sum it up, the dataset chosen has provided me an avenue to explore how certain variables interact with water potability. Although I was unable to get the results I was hoping for, the experience of working with the data was fascinating and I am very pleased with the final random forest model and the quality of its predictions.
+
+![](https://c.tenor.com/UladBrWhuJ8AAAAC/bowing-thank-you.gif)
